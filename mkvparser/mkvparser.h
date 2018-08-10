@@ -75,11 +75,15 @@ class Block {
  public:
   const long long m_start;
   const long long m_size;
+  const long long m_start_addition;
+  const long long m_size_addition;
 
-  Block(long long start, long long size, long long discard_padding);
+  Block(long long start, long long size, long long addition_start,
+        long long addition_size, long long discard_padding);
   ~Block();
 
   long Parse(const Cluster*);
+  long ParseAddition(const Cluster*);
 
   long long GetTrackNumber() const;
   long long GetTimeCode(const Cluster*) const;  // absolute, but not scaled
@@ -92,6 +96,7 @@ class Block {
   Lacing GetLacing() const;
 
   int GetFrameCount() const;  // to index frames: [0, count)
+  int GetFrameAdditionCount() const;
 
   struct Frame {
     long long pos;  // absolute offset
@@ -101,6 +106,7 @@ class Block {
   };
 
   const Frame& GetFrame(int frame_index) const;
+  const Frame& GetFrameAddition(int frame_index) const;
 
   long long GetDiscardPadding() const;
 
@@ -110,7 +116,9 @@ class Block {
   unsigned char m_flags;
 
   Frame* m_frames;
+  Frame* m_frames_addition;
   int m_frame_count;
+  int m_frames_addition_count;
 
  protected:
   const long long m_discard_padding;
@@ -162,6 +170,8 @@ class BlockGroup : public BlockEntry {
   BlockGroup(Cluster*, long index,
              long long block_start,  // absolute pos of block's payload
              long long block_size,  // size of block's payload
+             long long block_addition_start,  // absolute pos of block_addition's payload
+             long long block_addition_size,  // size of block_addition's payload
              long long prev, long long next, long long duration,
              long long discard_padding);
 

@@ -7170,6 +7170,9 @@ long Cluster::CreateBlockGroup(long long start_offset, long long size,
   long long bpos = -1;
   long long bsize = -1;
 
+  long long bpos_addition = -1;
+  long long bsize_addition = -1;
+
   while (pos < stop) {
     long len;
     const long long id = ReadID(pReader, pos, len);
@@ -7189,6 +7192,9 @@ long Cluster::CreateBlockGroup(long long start_offset, long long size,
         bpos = pos;
         bsize = size;
       }
+    } else if (id == libwebm::kMkvBlockAdditions) {
+      bpos_addition = pos;
+      bsize_addition = size;
     } else if (id == libwebm::kMkvBlockDuration) {
       if (size > 8)
         return E_FILE_FORMAT_INVALID;
@@ -7232,7 +7238,8 @@ long Cluster::CreateBlockGroup(long long start_offset, long long size,
   BlockEntry*& pEntry = *ppEntry;
 
   pEntry = new (std::nothrow)
-      BlockGroup(this, idx, bpos, bsize, prev, next, duration, discard_padding);
+      BlockGroup(this, idx, bpos, bsize, bpos_addition, bsize_addition, prev,
+                 next, duration, discard_padding);
 
   if (pEntry == NULL)
     return -1;  // generic error
@@ -7549,17 +7556,20 @@ long BlockEntry::GetIndex() const { return m_index; }
 
 SimpleBlock::SimpleBlock(Cluster* pCluster, long idx, long long start,
                          long long size)
-    : BlockEntry(pCluster, idx), m_block(start, size, 0) {}
+    : BlockEntry(pCluster, idx), m_block(start, size, -1, -1, 0) {}
 
 long SimpleBlock::Parse() { return m_block.Parse(m_pCluster); }
 BlockEntry::Kind SimpleBlock::GetKind() const { return kBlockSimple; }
 const Block* SimpleBlock::GetBlock() const { return &m_block; }
 
 BlockGroup::BlockGroup(Cluster* pCluster, long idx, long long block_start,
-                       long long block_size, long long prev, long long next,
-                       long long duration, long long discard_padding)
+                       long long block_size, long long block_addition_start,
+                       long long block_addition_size, long long prev,
+                       long long next, long long duration,
+                       long long discard_padding)
     : BlockEntry(pCluster, idx),
-      m_block(block_start, block_size, discard_padding),
+      m_block(block_start, block_size, block_addition_start,
+              block_addition_size, discard_padding),
       m_prev(prev),
       m_next(next),
       m_duration(duration) {}
@@ -7581,19 +7591,28 @@ long long BlockGroup::GetPrevTimeCode() const { return m_prev; }
 long long BlockGroup::GetNextTimeCode() const { return m_next; }
 long long BlockGroup::GetDurationTimeCode() const { return m_duration; }
 
-Block::Block(long long start, long long size_, long long discard_padding)
+Block::Block(long long start, long long size_, long long addition_start,
+             long long addition_size, long long discard_padding)
     : m_start(start),
       m_size(size_),
+      m_start_addition(addition_start),
+      m_size_addition(addition_size),
       m_track(0),
       m_timecode(-1),
       m_flags(0),
       m_frames(NULL),
+      m_frames_addition(NULL),
       m_frame_count(-1),
+      m_frames_addition_count(-1),
       m_discard_padding(discard_padding) {}
 
 Block::~Block() { delete[] m_frames; }
 
 long Block::Parse(const Cluster* pCluster) {
+  long ret = ParseAddition(pCluster);
+  if (ret)
+    return ret;
+
   if (pCluster == NULL)
     return -1;
 
@@ -7963,6 +7982,69 @@ long Block::Parse(const Cluster* pCluster) {
   return 0;  // success
 }
 
+long Block::ParseAddition(const Cluster* pCluster) {
+  if (pCluster == NULL)
+    return -1;
+
+  if (pCluster->m_pSegment == NULL)
+    return -1;
+
+  if (m_size_addition <= 0)
+    return 0;
+
+  assert(m_frames_addition == NULL);
+  assert(m_frames_addition_count <= 0);
+
+  long long pos = m_start_addition;
+  const long long stop = m_start_addition + m_size_addition;
+
+  long len;
+  long long id;
+  long long size;
+
+  IMkvReader* const pReader = pCluster->m_pSegment->m_pReader;
+
+  id = ReadID(pReader, pos, len);
+  if (id == libwebm::kMkvBlockMore) {
+    pos += len;
+    size = ReadUInt(pReader, pos, len);
+    pos += len;
+  }
+
+  id = ReadID(pReader, pos, len);
+  if (id == libwebm::kMkvBlockAddID) {
+    pos += len;
+    size = ReadUInt(pReader, pos, len);
+    pos += len;
+    UnserializeInt(pReader, pos, size, id);
+    pos += size;
+  }
+
+  id = ReadID(pReader, pos, len);
+  if (id == libwebm::kMkvBlockAdditional) {
+    pos += len;
+    size = ReadUInt(pReader, pos, len);
+    pos += len;
+  }
+
+  m_frames_addition_count = 1;
+  m_frames_addition = new (std::nothrow) Frame[m_frames_addition_count];
+  if (m_frames_addition == NULL)
+    return -1;
+
+  Frame& f = m_frames_addition[0];
+  f.pos = pos;
+
+  const long long frame_size = size;
+
+  if (frame_size > LONG_MAX || frame_size <= 0)
+    return E_FILE_FORMAT_INVALID;
+
+  f.len = static_cast<long>(frame_size);
+
+  return 0;
+}
+
 long long Block::GetTimeCode(const Cluster* pCluster) const {
   if (pCluster == 0)
     return m_timecode;
@@ -8022,12 +8104,24 @@ Block::Lacing Block::GetLacing() const {
 }
 
 int Block::GetFrameCount() const { return m_frame_count; }
+int Block::GetFrameAdditionCount() const { return m_frames_addition_count; }
 
 const Block::Frame& Block::GetFrame(int idx) const {
   assert(idx >= 0);
   assert(idx < m_frame_count);
 
   const Frame& f = m_frames[idx];
+  assert(f.pos > 0);
+  assert(f.len > 0);
+
+  return f;
+}
+
+const mkvparser::Block::Frame& Block::GetFrameAddition(int frame_index) const {
+  assert(frame_index >= 0);
+  assert(frame_index < m_frames_addition_count);
+
+  const Frame& f = m_frames_addition[frame_index];
   assert(f.pos > 0);
   assert(f.len > 0);
 
