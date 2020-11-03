@@ -7606,7 +7606,10 @@ Block::Block(long long start, long long size_, long long addition_start,
       m_frames_addition_count(-1),
       m_discard_padding(discard_padding) {}
 
-Block::~Block() { delete[] m_frames; }
+Block::~Block() {
+    delete[] m_frames; 
+    delete[] m_frames_addition;
+}
 
 long Block::Parse(const Cluster* pCluster) {
   long ret = ParseAddition(pCluster);
